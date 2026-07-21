@@ -213,6 +213,25 @@ func (k msgServer) ApproveRoleChange(ctx context.Context, msg *types.MsgApproveR
 	return &types.MsgApproveRoleChangeResponse{Applied: applied}, nil
 }
 
+// CancelRoleChange cancels an open pending role change. Only the original proposer may cancel.
+func (k msgServer) CancelRoleChange(ctx context.Context, msg *types.MsgCancelRoleChange) (*types.MsgCancelRoleChangeResponse, error) {
+	change, err := k.GetPendingRoleChange(ctx, msg.ChangeId)
+	if err != nil {
+		return nil, err
+	}
+	if change == nil {
+		return nil, types.NewErrCodePendingChangeNotFound(msg.ChangeId)
+	}
+	if change.Proposer != msg.Signer {
+		return nil, types.NewErrCodeUnauthorized("only the original proposer may cancel a pending role change")
+	}
+	if err := k.RemovePendingRoleChange(ctx, msg.ChangeId); err != nil {
+		return nil, err
+	}
+	k.EmitEvent(ctx, types.NewEventRoleChangeCancelled(msg.ChangeId, msg.Signer))
+	return &types.MsgCancelRoleChangeResponse{}, nil
+}
+
 // CreateRegistryClass creates a new registry class defining asset class-level authorization rules.
 func (k msgServer) CreateRegistryClass(ctx context.Context, msg *types.MsgCreateRegistryClass) (*types.MsgCreateRegistryClassResponse, error) {
 	class := types.RegistryClass{

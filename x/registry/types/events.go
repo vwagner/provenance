@@ -76,6 +76,14 @@ func NewEventRoleChangeApplied(change *PendingRoleChange) *EventRoleChangeApplie
 	}
 }
 
+// NewEventRoleChangeCancelled returns a new EventRoleChangeCancelled.
+func NewEventRoleChangeCancelled(changeID, cancelledBy string) *EventRoleChangeCancelled {
+	return &EventRoleChangeCancelled{
+		ChangeId:    changeID,
+		CancelledBy: cancelledBy,
+	}
+}
+
 // NewEventRegistryClassCreated returns a new EventRegistryClassCreated.
 func NewEventRegistryClassCreated(class *RegistryClass) *EventRegistryClassCreated {
 	return &EventRegistryClassCreated{

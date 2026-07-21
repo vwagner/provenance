@@ -62,6 +62,12 @@ message EventRoleChangeApplied {
   string change_id      = 3;
 }
 
+// EventRoleChangeCancelled is emitted when a pending role change is cancelled by its proposer.
+message EventRoleChangeCancelled {
+  string change_id  = 1;
+  string cancelled_by = 2;
+}
+
 // EventRegistryClassCreated is emitted when a registry class is created.
 message EventRegistryClassCreated {
   string registry_class_id = 1;

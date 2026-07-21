@@ -177,6 +177,20 @@ func (m MsgApproveRoleChange) ValidateBasic() error {
 	return errors.Join(errs...)
 }
 
+// ValidateBasic validates the MsgCancelRoleChange message
+func (m MsgCancelRoleChange) ValidateBasic() error {
+	var errs []error
+	if _, err := sdk.AccAddressFromBech32(m.Signer); err != nil {
+		errs = append(errs, NewErrCodeInvalidField("signer", "%s", err))
+	}
+
+	if len(m.ChangeId) == 0 {
+		errs = append(errs, NewErrCodeInvalidField("change_id", "change_id is required"))
+	}
+
+	return errors.Join(errs...)
+}
+
 // ValidateBasic validates the MsgCreateRegistryClass message
 func (m MsgCreateRegistryClass) ValidateBasic() error {
 	var errs []error

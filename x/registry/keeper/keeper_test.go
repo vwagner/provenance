@@ -857,6 +857,87 @@ func (s *KeeperTestSuite) TestProposeRoleChange_LimitOnePerNFT() {
 	require.NoError(err, "co-approving the same pending change must be allowed")
 }
 
+// TestCancelRoleChange verifies that a pending role change can be cancelled by its proposer and
+// that non-proposers are rejected.
+func (s *KeeperTestSuite) TestCancelRoleChange() {
+	key := &types.RegistryKey{
+		AssetClassId: s.validNFTClass.Id,
+		NftId:        s.validNFT.Id,
+	}
+	require := s.Require()
+
+	require.NoError(s.app.RegistryKeeper.SetParams(s.ctx, types.Params{
+		RoleAuthorizations: types.ControllerRoleAuthorizations(),
+	}))
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user1}},
+	}, ""))
+
+	changeID, applied, err := s.app.RegistryKeeper.ProposeRoleChange(s.ctx, s.user1, key, []types.RoleUpdate{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user2}},
+	})
+	require.NoError(err)
+	require.False(applied)
+
+	msgServer := keeper.NewMsgServer(s.app.RegistryKeeper)
+
+	// Non-proposer cannot cancel.
+	_, err = msgServer.CancelRoleChange(s.ctx, &types.MsgCancelRoleChange{
+		Signer:   s.user2,
+		ChangeId: changeID,
+	})
+	require.Error(err)
+	require.Contains(err.Error(), "unauthorized")
+
+	// Proposer can cancel.
+	_, err = msgServer.CancelRoleChange(s.ctx, &types.MsgCancelRoleChange{
+		Signer:   s.user1,
+		ChangeId: changeID,
+	})
+	require.NoError(err, "proposer must be able to cancel the pending change")
+
+	// Change must be gone.
+	change, err := s.app.RegistryKeeper.GetPendingRoleChange(s.ctx, changeID)
+	require.NoError(err)
+	require.Nil(change, "pending change must not exist after cancellation")
+}
+
+// TestPendingRoleChange_Expiry verifies that approvals on an expired pending change are rejected
+// and the expired record is cleaned up.
+func (s *KeeperTestSuite) TestPendingRoleChange_Expiry() {
+	key := &types.RegistryKey{
+		AssetClassId: s.validNFTClass.Id,
+		NftId:        s.validNFT.Id,
+	}
+	require := s.Require()
+
+	require.NoError(s.app.RegistryKeeper.SetParams(s.ctx, types.Params{
+		RoleAuthorizations:   types.ControllerRoleAuthorizations(),
+		PendingChangeExpiry:  time.Hour,
+	}))
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user1}},
+	}, ""))
+
+	changeID, applied, err := s.app.RegistryKeeper.ProposeRoleChange(s.ctx, s.user1, key, []types.RoleUpdate{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user2}},
+	})
+	require.NoError(err)
+	require.False(applied)
+
+	// Advance block time past the expiry.
+	s.ctx = s.ctx.WithBlockTime(s.ctx.BlockTime().Add(2 * time.Hour))
+
+	// Approval after expiry must be rejected and the record removed.
+	_, err = s.app.RegistryKeeper.ApproveRoleChange(s.ctx, s.user2, changeID)
+	require.Error(err, "approving an expired change must fail")
+	require.Contains(err.Error(), "pending role change not found")
+
+	change, err := s.app.RegistryKeeper.GetPendingRoleChange(s.ctx, changeID)
+	require.NoError(err)
+	require.Nil(change, "expired change must be removed on failed approval")
+}
+
 func (s *KeeperTestSuite) TestRegisterNFTMsgServer() {
 	tests := []struct {
 		name     string

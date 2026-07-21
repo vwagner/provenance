@@ -7,6 +7,7 @@ option java_multiple_files = true;
 
 import "gogoproto/gogo.proto";
 import "provenance/registry/v1/authorization.proto";
+import "google/protobuf/duration.proto";
 
 // Params defines the registry module's parameters.
 message Params {
@@ -15,4 +16,10 @@ message Params {
   // the two-tier resolution: a registry class policy takes precedence, then these module defaults,
   // and finally roles without any policy fall back to legacy NFT-owner authorization.
   repeated RoleAuthorization role_authorizations = 1 [(gogoproto.nullable) = false];
+
+  // pending_change_expiry is how long a pending role change remains valid after it is proposed.
+  // Approvals received after the expiry are rejected and the change is cleaned up.
+  // Zero value (default) means pending changes never expire.
+  google.protobuf.Duration pending_change_expiry = 2
+      [(gogoproto.stdduration) = true, (gogoproto.nullable) = false];
 }

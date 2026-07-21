@@ -14,10 +14,12 @@ func DefaultParams() Params {
 
 // Validate validates the Params.
 func (p Params) Validate() error {
-	if errs := validateRoleAuthorizations(p.RoleAuthorizations); len(errs) > 0 {
-		return errors.Join(errs...)
+	var errs []error
+	errs = append(errs, validateRoleAuthorizations(p.RoleAuthorizations)...)
+	if p.PendingChangeExpiry < 0 {
+		errs = append(errs, NewErrCodeInvalidField("pending_change_expiry", "must be non-negative"))
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // RoleAuthorizationMap returns a map of RegistryRole -> RoleAuthorization for the params' default

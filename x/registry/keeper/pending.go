@@ -7,6 +7,7 @@ import (
 
 	"cosmossdk.io/collections"
 
+	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/query"
 
 	"github.com/provenance-io/provenance/x/registry/types"
@@ -143,6 +144,10 @@ func (k Keeper) ProposeRoleChange(ctx context.Context, proposer string, key *typ
 			RoleUpdates: roleUpdates,
 			Proposer:    proposer,
 		}
+		// Set expiry if the module params configure one.
+		if expiry := k.GetParams(ctx).PendingChangeExpiry; expiry > 0 {
+			newChange.ExpiresAt = sdk.UnwrapSDKContext(ctx).BlockTime().Add(expiry)
+		}
 		// Only open a new pending change when the proposer could actually contribute a valid
 		// approval to at least one affected role. This keeps state from growing via proposals
 		// opened by accounts that are not a required party for the change.
@@ -175,6 +180,14 @@ func (k Keeper) ApproveRoleChange(ctx context.Context, approver string, changeID
 	}
 	if change == nil {
 		return false, types.NewErrCodePendingChangeNotFound(changeID)
+	}
+
+	// Reject and clean up expired changes.
+	if !change.ExpiresAt.IsZero() && !sdk.UnwrapSDKContext(ctx).BlockTime().Before(change.ExpiresAt) {
+		if rerr := k.RemovePendingRoleChange(ctx, changeID); rerr != nil {
+			return false, rerr
+		}
+		return false, types.NewErrCodePendingChangeNotFound(changeID + " (expired)")
 	}
 
 	entry, err := k.GetRegistry(ctx, change.Key)
