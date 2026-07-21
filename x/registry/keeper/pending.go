@@ -128,12 +128,21 @@ func (k Keeper) ProposeRoleChange(ctx context.Context, proposer string, key *typ
 	if change == nil {
 		// Reject if there's already a different pending change for this key. Limiting to one
 		// pending change per NFT prevents conflicting proposals from accumulating; the existing
-		// change must be cancelled or applied first.
+		// change must be cancelled or applied first. Expired records are cleaned up eagerly here
+		// so they don't block new proposals indefinitely.
 		existing, _, err := k.GetPendingRoleChanges(ctx, nil, key)
 		if err != nil {
 			return "", false, err
 		}
-		if len(existing) > 0 {
+		blockTime := sdk.UnwrapSDKContext(ctx).BlockTime()
+		for _, ex := range existing {
+			if !ex.ExpiresAt.IsZero() && !blockTime.Before(ex.ExpiresAt) {
+				// Expired — remove it so it no longer blocks new proposals.
+				if rerr := k.RemovePendingRoleChange(ctx, ex.Id); rerr != nil {
+					return "", false, rerr
+				}
+				continue
+			}
 			return "", false, types.NewErrCodeInvalidField("role_updates",
 				"a pending role change already exists for this NFT; cancel or apply the existing change first")
 		}
@@ -162,6 +171,16 @@ func (k Keeper) ProposeRoleChange(ctx context.Context, proposer string, key *typ
 		}
 		change = newChange
 		k.EmitEvent(ctx, types.NewEventRoleChangeProposed(change))
+	} else {
+		// Reusing an existing pending record (same change ID = same role updates, acting as a
+		// co-approval). Check expiry here too so that MsgProposeRoleChange cannot be used to
+		// bypass the expiry enforcement that applies to MsgApproveRoleChange.
+		if !change.ExpiresAt.IsZero() && !sdk.UnwrapSDKContext(ctx).BlockTime().Before(change.ExpiresAt) {
+			if rerr := k.RemovePendingRoleChange(ctx, change.Id); rerr != nil {
+				return "", false, rerr
+			}
+			return "", false, types.NewErrCodePendingChangeNotFound(change.Id + " (expired)")
+		}
 	}
 
 	applied, err := k.recordApprovalAndMaybeApply(ctx, entry, change, proposer)

@@ -695,8 +695,10 @@ func (s *KeeperTestSuite) GenesisTest() {
 	s.Require().Equal(genesis1, genesis2)
 }
 
-// TestUnregisterNFT_RequiresControllerSignature verifies that an NFT owner cannot unilaterally
-// unregister an NFT while a CONTROLLER is set, preventing policy bypass via unregister+re-register.
+// TestUnregisterNFT_RequiresControllerSignature verifies that when a CONTROLLER is set, the
+// controller (not the NFT owner) must sign. When no controller is set, the NFT owner signs.
+// This prevents an owner from bypassing policies via unregister+re-register while ensuring
+// the controller can always unregister even if they don't own the NFT.
 func (s *KeeperTestSuite) TestUnregisterNFT_RequiresControllerSignature() {
 	key := &types.RegistryKey{
 		AssetClassId: s.validNFTClass.Id,
@@ -705,29 +707,28 @@ func (s *KeeperTestSuite) TestUnregisterNFT_RequiresControllerSignature() {
 	require := s.Require()
 	msgServer := keeper.NewMsgServer(s.app.RegistryKeeper)
 
-	// Register with user1 as CONTROLLER (user1 also owns the NFT via Mint in SetupTest).
-	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
-		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user1}},
-	}, ""))
-
-	// user1 owns the NFT but is also the CONTROLLER, so unregistration is allowed.
+	// No controller set: NFT owner (user1) can unregister.
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{}, ""))
 	_, err := msgServer.UnregisterNFT(s.ctx, &types.MsgUnregisterNFT{Signer: s.user1, Key: key})
-	require.NoError(err, "controller who also owns the NFT must be able to unregister")
+	require.NoError(err, "NFT owner must be able to unregister when no controller is set")
 
-	// Re-register with user2 as CONTROLLER. user1 still owns the NFT.
+	// Register with user2 as CONTROLLER. user1 still owns the NFT.
 	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
 		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user2}},
 	}, ""))
 
-	// user1 (NFT owner, but NOT the controller) tries to unregister — must be rejected.
+	// user1 (NFT owner, not controller) is rejected.
 	_, err = msgServer.UnregisterNFT(s.ctx, &types.MsgUnregisterNFT{Signer: s.user1, Key: key})
-	require.Error(err, "NFT owner should not be able to unregister while a different controller is set")
+	require.Error(err, "NFT owner without controller role must be rejected")
 	require.Contains(err.Error(), "unauthorized")
 
-	// Entry must still exist.
+	// user2 (controller, not NFT owner) can unregister.
+	_, err = msgServer.UnregisterNFT(s.ctx, &types.MsgUnregisterNFT{Signer: s.user2, Key: key})
+	require.NoError(err, "controller must be able to unregister even without owning the NFT")
+
 	entry, err := s.app.RegistryKeeper.GetRegistry(s.ctx, key)
 	require.NoError(err)
-	require.NotNil(entry, "registry entry must remain after rejected unregistration")
+	require.Nil(entry, "registry entry must be gone after controller unregistration")
 }
 
 // TestRegistryBulkUpdate_EnforcesRolePolicies verifies that RegistryBulkUpdate validates role
@@ -936,6 +937,79 @@ func (s *KeeperTestSuite) TestPendingRoleChange_Expiry() {
 	change, err := s.app.RegistryKeeper.GetPendingRoleChange(s.ctx, changeID)
 	require.NoError(err)
 	require.Nil(change, "expired change must be removed on failed approval")
+
+	// After expiry cleans up via ApproveRoleChange, a new proposal must succeed.
+	_, _, err = s.app.RegistryKeeper.ProposeRoleChange(s.ctx, s.user1, key, []types.RoleUpdate{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user2}},
+	})
+	require.NoError(err, "new proposal must be accepted after expired record is cleaned up")
+}
+
+// TestPendingRoleChange_ExpiredBlocksProposal verifies that an expired pending change is cleaned
+// up eagerly when a new proposal is made, instead of blocking it indefinitely.
+func (s *KeeperTestSuite) TestPendingRoleChange_ExpiredBlocksProposal() {
+	key := &types.RegistryKey{
+		AssetClassId: s.validNFTClass.Id,
+		NftId:        s.validNFT.Id,
+	}
+	require := s.Require()
+
+	require.NoError(s.app.RegistryKeeper.SetParams(s.ctx, types.Params{
+		RoleAuthorizations:  types.ControllerRoleAuthorizations(),
+		PendingChangeExpiry: time.Hour,
+	}))
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user1}},
+	}, ""))
+
+	// First proposal leaves a pending change that will expire.
+	_, _, err := s.app.RegistryKeeper.ProposeRoleChange(s.ctx, s.user1, key, []types.RoleUpdate{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user2}},
+	})
+	require.NoError(err)
+
+	// Advance past expiry.
+	s.ctx = s.ctx.WithBlockTime(s.ctx.BlockTime().Add(2 * time.Hour))
+
+	// A new proposal with different role updates must succeed: the expired record is cleaned up
+	// eagerly rather than blocking the new proposal.
+	_, _, err = s.app.RegistryKeeper.ProposeRoleChange(s.ctx, s.user1, key, []types.RoleUpdate{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user1}},
+	})
+	require.NoError(err, "proposal must succeed after expired pending change is cleaned up")
+}
+
+// TestPendingRoleChange_ExpiryBypassViaPropose verifies that MsgProposeRoleChange also enforces
+// expiry when reusing an existing pending record, preventing the expiry from being bypassed.
+func (s *KeeperTestSuite) TestPendingRoleChange_ExpiryBypassViaPropose() {
+	key := &types.RegistryKey{
+		AssetClassId: s.validNFTClass.Id,
+		NftId:        s.validNFT.Id,
+	}
+	require := s.Require()
+
+	require.NoError(s.app.RegistryKeeper.SetParams(s.ctx, types.Params{
+		RoleAuthorizations:  types.ControllerRoleAuthorizations(),
+		PendingChangeExpiry: time.Hour,
+	}))
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user1}},
+	}, ""))
+
+	// Propose a change; user2 has not yet co-signed.
+	roleUpdates := []types.RoleUpdate{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user2}},
+	}
+	_, _, err := s.app.RegistryKeeper.ProposeRoleChange(s.ctx, s.user1, key, roleUpdates)
+	require.NoError(err)
+
+	// Advance past expiry.
+	s.ctx = s.ctx.WithBlockTime(s.ctx.BlockTime().Add(2 * time.Hour))
+
+	// Attempting to co-approve via ProposeRoleChange (same change ID) must also be rejected.
+	_, _, err = s.app.RegistryKeeper.ProposeRoleChange(s.ctx, s.user2, key, roleUpdates)
+	require.Error(err, "propose co-approval on expired change must fail")
+	require.Contains(err.Error(), "pending role change not found")
 }
 
 func (s *KeeperTestSuite) TestRegisterNFTMsgServer() {

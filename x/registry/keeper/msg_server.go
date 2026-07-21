@@ -273,22 +273,29 @@ func (k msgServer) UpdateParams(ctx context.Context, msg *types.MsgUpdateParams)
 // UnregisterNFT unregisters an NFT from the registry.
 // This removes the entire registry entry and associated data for the specified key.
 func (k msgServer) UnregisterNFT(ctx context.Context, msg *types.MsgUnregisterNFT) (*types.MsgUnregisterNFTResponse, error) {
-	// Validate that the signer owns the NFT
-	if err := k.ValidateNFTOwner(ctx, &msg.Key.AssetClassId, &msg.Key.NftId, msg.Signer); err != nil {
-		return nil, err
-	}
-
-	// If a CONTROLLER is set on the entry, the signer must also be the CONTROLLER. Without this
-	// check an NFT owner could bypass multi-party role policies by unregistering and re-registering
-	// with new roles.
 	entry, err := k.GetRegistry(ctx, msg.Key)
 	if err != nil {
 		return nil, fmt.Errorf("could not get registry entry: %w", err)
 	}
+
+	// If a CONTROLLER is set, the CONTROLLER must sign. This prevents an NFT owner from bypassing
+	// multi-party role policies by unregistering and re-registering with new roles. The controller
+	// does not need to own the NFT — the controller role is authoritative for this action when set.
+	// If no controller is set, fall back to NFT-ownership authorization.
 	if entry != nil {
 		controllers := entry.GetRoleAddrs(types.RegistryRole_REGISTRY_ROLE_CONTROLLER)
-		if len(controllers) > 0 && !slices.Contains(controllers, msg.Signer) {
-			return nil, types.NewErrCodeUnauthorized("signer is not the controller")
+		if len(controllers) > 0 {
+			if !slices.Contains(controllers, msg.Signer) {
+				return nil, types.NewErrCodeUnauthorized("signer is not the controller")
+			}
+		} else {
+			if err := k.ValidateNFTOwner(ctx, &msg.Key.AssetClassId, &msg.Key.NftId, msg.Signer); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		if err := k.ValidateNFTOwner(ctx, &msg.Key.AssetClassId, &msg.Key.NftId, msg.Signer); err != nil {
+			return nil, err
 		}
 	}
 
@@ -345,7 +352,11 @@ func (k msgServer) RegistryBulkUpdate(ctx context.Context, msg *types.MsgRegistr
 			// Validate roles being set or changed to a new desired state.
 			for _, roleEntry := range entry.Roles {
 				if roleAuth, ok := roleAuths[roleEntry.Role]; ok {
-					if err := k.Keeper.ValidateRoleChangeAuthorization(ctx, roleAuth, orig, roleEntry.Addresses, []string{msg.Signer}); err != nil {
+					// Pass only newly added addresses (not the full list) to match the semantics of
+					// GrantRole / SetRoles, where ASSIGNMENT_NEW* policies are evaluated against
+					// addresses that are incoming — not those already holding the role.
+					newAddrs := additions(orig.GetRoleAddrs(roleEntry.Role), roleEntry.Addresses)
+					if err := k.Keeper.ValidateRoleChangeAuthorization(ctx, roleAuth, orig, newAddrs, []string{msg.Signer}); err != nil {
 						return nil, fmt.Errorf("[%d] unauthorized update for role %s: %w", i, roleEntry.Role.ShortString(), err)
 					}
 				}
