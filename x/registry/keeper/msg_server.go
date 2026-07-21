@@ -298,6 +298,40 @@ func (k msgServer) RegistryBulkUpdate(ctx context.Context, msg *types.MsgRegistr
 			return nil, fmt.Errorf("could not get existing registry entry [%d]: %w", i, err)
 		}
 
+		// When updating an existing entry, validate each role change through the authorization
+		// engine so that RegistryBulkUpdate cannot bypass the multi-party policies enforced by
+		// GrantRole, RevokeRole, and SetRoles. Authority addresses are exempt from this check (they
+		// also bypass NFT-ownership validation above). New registrations (orig == nil) are treated
+		// like RegisterNFT: NFT ownership was already verified, so initial role seeding is allowed.
+		if orig != nil && msg.Signer != authority1 && msg.Signer != authority2 {
+			roleAuths := types.RoleAuthorizationMap()
+			// Validate roles being set or changed to a new desired state.
+			for _, roleEntry := range entry.Roles {
+				if roleAuth, ok := roleAuths[roleEntry.Role]; ok {
+					if err := k.Keeper.ValidateRoleChangeAuthorization(ctx, roleAuth, orig, roleEntry.Addresses, []string{msg.Signer}); err != nil {
+						return nil, fmt.Errorf("[%d] unauthorized update for role %s: %w", i, roleEntry.Role.ShortString(), err)
+					}
+				}
+			}
+			// Validate roles being cleared (present in orig but absent from the new entry).
+			for _, origRole := range orig.Roles {
+				hasInNew := false
+				for _, newRole := range entry.Roles {
+					if newRole.Role == origRole.Role {
+						hasInNew = true
+						break
+					}
+				}
+				if !hasInNew {
+					if roleAuth, ok := roleAuths[origRole.Role]; ok {
+						if err := k.Keeper.ValidateRoleChangeAuthorization(ctx, roleAuth, orig, nil, []string{msg.Signer}); err != nil {
+							return nil, fmt.Errorf("[%d] unauthorized removal of role %s: %w", i, origRole.Role.ShortString(), err)
+						}
+					}
+				}
+			}
+		}
+
 		// Store the registry.
 		err = k.Registry.Set(ctx, entry.Key.CollKey(), entry)
 		if err != nil {

@@ -175,6 +175,17 @@ func (k Keeper) DeleteRegistry(ctx context.Context, key *types.RegistryKey) erro
 		return fmt.Errorf("error removing registry: %w", err)
 	}
 
+	// Remove any pending role changes so stale approvals cannot be replayed if the NFT is re-registered.
+	pending, _, err := k.GetPendingRoleChanges(ctx, nil, key)
+	if err != nil {
+		return fmt.Errorf("error fetching pending role changes for cleanup: %w", err)
+	}
+	for _, pc := range pending {
+		if err := k.RemovePendingRoleChange(ctx, pc.Id); err != nil {
+			return fmt.Errorf("error removing stale pending role change %s: %w", pc.Id, err)
+		}
+	}
+
 	k.EmitEvent(ctx, types.NewEventNFTUnregistered(key))
 	for _, entry := range reg.Roles {
 		k.EmitEvent(ctx, types.NewEventRoleRevoked(key, entry.Role, entry.Addresses))

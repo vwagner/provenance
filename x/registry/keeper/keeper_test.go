@@ -695,6 +695,84 @@ func (s *KeeperTestSuite) GenesisTest() {
 	s.Require().Equal(genesis1, genesis2)
 }
 
+// TestRegistryBulkUpdate_EnforcesRolePolicies verifies that RegistryBulkUpdate validates role
+// changes through the authorization engine when updating existing entries, so it cannot bypass the
+// same multi-party policies enforced by GrantRole / RevokeRole / SetRoles.
+func (s *KeeperTestSuite) TestRegistryBulkUpdate_EnforcesRolePolicies() {
+	key := &types.RegistryKey{
+		AssetClassId: s.validNFTClass.Id,
+		NftId:        s.validNFT.Id,
+	}
+	controllerRole := types.RegistryRole_REGISTRY_ROLE_CONTROLLER
+
+	// Seed an existing entry with user1 as CONTROLLER (user1 also owns the NFT).
+	require := s.Require()
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
+		{Role: controllerRole, Addresses: []string{s.user1}},
+	}))
+
+	// user1 (current controller + NFT owner) tries to transfer CONTROLLER to user2 without user2
+	// co-signing. The CONTROLLER policy requires the incoming controller to sign; this must fail.
+	msgServer := keeper.NewMsgServer(s.app.RegistryKeeper)
+	_, err := msgServer.RegistryBulkUpdate(s.ctx, &types.MsgRegistryBulkUpdate{
+		Signer: s.user1,
+		Entries: []types.RegistryEntry{
+			{
+				Key: key,
+				Roles: []types.RolesEntry{
+					{Role: controllerRole, Addresses: []string{s.user2}},
+				},
+			},
+		},
+	})
+	require.Error(err, "BulkUpdate should reject controller transfer without incoming controller signature")
+	require.Contains(err.Error(), "unauthorized")
+
+	// The original entry must be unchanged.
+	entry, err := s.app.RegistryKeeper.GetRegistry(s.ctx, key)
+	require.NoError(err)
+	require.Equal([]string{s.user1}, entry.GetRoleAddrs(controllerRole), "controller must remain user1")
+}
+
+// TestDeleteRegistry_ClearsPendingRoleChanges verifies that DeleteRegistry removes any pending
+// role change records for the deleted entry so stale approvals cannot be replayed after
+// re-registration.
+func (s *KeeperTestSuite) TestDeleteRegistry_ClearsPendingRoleChanges() {
+	key := &types.RegistryKey{
+		AssetClassId: s.validNFTClass.Id,
+		NftId:        s.validNFT.Id,
+	}
+	require := s.Require()
+
+	// Register the NFT with user1 as CONTROLLER.
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user1}},
+	}))
+
+	// Propose a controller change to user2. Because user2 (incoming controller) has not yet
+	// co-signed, this creates a pending change record rather than applying immediately.
+	changeID, applied, err := s.app.RegistryKeeper.ProposeRoleChange(s.ctx, s.user1, key, []types.RoleUpdate{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user2}},
+	})
+	require.NoError(err)
+	require.False(applied, "change should be pending, not immediately applied")
+	require.NotEmpty(changeID)
+
+	// Confirm the pending change exists.
+	pending, _, err := s.app.RegistryKeeper.GetPendingRoleChanges(s.ctx, nil, key)
+	require.NoError(err)
+	require.Len(pending, 1, "pending change should exist before delete")
+
+	// Delete the registry entry.
+	require.NoError(s.app.RegistryKeeper.DeleteRegistry(s.ctx, key))
+
+	// The pending change must be gone: without this cleanup, re-registration of the same NFT would
+	// allow the stale approvals to be replayed against the new entry.
+	pending, _, err = s.app.RegistryKeeper.GetPendingRoleChanges(s.ctx, nil, key)
+	require.NoError(err)
+	require.Empty(pending, "pending changes must be cleared after delete")
+}
+
 func (s *KeeperTestSuite) TestRegisterNFTMsgServer() {
 	tests := []struct {
 		name     string
