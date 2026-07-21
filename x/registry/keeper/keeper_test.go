@@ -816,6 +816,47 @@ func (s *KeeperTestSuite) TestDeleteRegistry_ClearsPendingRoleChanges() {
 	require.Empty(pending, "pending changes must be cleared after delete")
 }
 
+// TestProposeRoleChange_LimitOnePerNFT verifies that only one pending role change can exist for a
+// given NFT at a time. A second proposal for a different set of role updates must be rejected until
+// the first is cancelled or applied.
+func (s *KeeperTestSuite) TestProposeRoleChange_LimitOnePerNFT() {
+	key := &types.RegistryKey{
+		AssetClassId: s.validNFTClass.Id,
+		NftId:        s.validNFT.Id,
+	}
+	require := s.Require()
+
+	// Install the CONTROLLER policy.
+	require.NoError(s.app.RegistryKeeper.SetParams(s.ctx, types.Params{
+		RoleAuthorizations: types.ControllerRoleAuthorizations(),
+	}))
+
+	// Register with user1 as CONTROLLER.
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user1}},
+	}, ""))
+
+	// First proposal: transfer CONTROLLER to user2. Leaves a pending change (user2 must co-sign).
+	_, applied, err := s.app.RegistryKeeper.ProposeRoleChange(s.ctx, s.user1, key, []types.RoleUpdate{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user2}},
+	})
+	require.NoError(err)
+	require.False(applied)
+
+	// Second proposal with different role updates must be rejected while the first is pending.
+	_, _, err = s.app.RegistryKeeper.ProposeRoleChange(s.ctx, s.user1, key, []types.RoleUpdate{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user1}},
+	})
+	require.Error(err, "second conflicting proposal should be rejected")
+	require.Contains(err.Error(), "pending role change already exists")
+
+	// Re-proposing the same role updates (same ID) is allowed — it acts as a co-approval.
+	_, _, err = s.app.RegistryKeeper.ProposeRoleChange(s.ctx, s.user2, key, []types.RoleUpdate{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user2}},
+	})
+	require.NoError(err, "co-approving the same pending change must be allowed")
+}
+
 func (s *KeeperTestSuite) TestRegisterNFTMsgServer() {
 	tests := []struct {
 		name     string

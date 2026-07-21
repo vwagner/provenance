@@ -125,6 +125,18 @@ func (k Keeper) ProposeRoleChange(ctx context.Context, proposer string, key *typ
 		return "", false, err
 	}
 	if change == nil {
+		// Reject if there's already a different pending change for this key. Limiting to one
+		// pending change per NFT prevents conflicting proposals from accumulating; the existing
+		// change must be cancelled or applied first.
+		existing, _, err := k.GetPendingRoleChanges(ctx, nil, key)
+		if err != nil {
+			return "", false, err
+		}
+		if len(existing) > 0 {
+			return "", false, types.NewErrCodeInvalidField("role_updates",
+				"a pending role change already exists for this NFT; cancel or apply the existing change first")
+		}
+
 		newChange := &types.PendingRoleChange{
 			Id:          id,
 			Key:         key,
