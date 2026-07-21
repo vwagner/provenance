@@ -3,6 +3,7 @@ package keeper
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/gogoproto/proto"
@@ -258,6 +259,20 @@ func (k msgServer) UnregisterNFT(ctx context.Context, msg *types.MsgUnregisterNF
 		return nil, err
 	}
 
+	// If a CONTROLLER is set on the entry, the signer must also be the CONTROLLER. Without this
+	// check an NFT owner could bypass multi-party role policies by unregistering and re-registering
+	// with new roles.
+	entry, err := k.GetRegistry(ctx, msg.Key)
+	if err != nil {
+		return nil, fmt.Errorf("could not get registry entry: %w", err)
+	}
+	if entry != nil {
+		controllers := entry.GetRoleAddrs(types.RegistryRole_REGISTRY_ROLE_CONTROLLER)
+		if len(controllers) > 0 && !slices.Contains(controllers, msg.Signer) {
+			return nil, types.NewErrCodeUnauthorized("signer is not the controller")
+		}
+	}
+
 	if err := k.DeleteRegistry(ctx, msg.Key); err != nil {
 		return nil, err
 	}
@@ -304,7 +319,10 @@ func (k msgServer) RegistryBulkUpdate(ctx context.Context, msg *types.MsgRegistr
 		// also bypass NFT-ownership validation above). New registrations (orig == nil) are treated
 		// like RegisterNFT: NFT ownership was already verified, so initial role seeding is allowed.
 		if orig != nil && msg.Signer != authority1 && msg.Signer != authority2 {
-			roleAuths := types.RoleAuthorizationMap()
+			roleAuths, err := k.roleAuthorizationsForEntry(ctx, orig)
+			if err != nil {
+				return nil, fmt.Errorf("[%d] could not get role authorizations: %w", i, err)
+			}
 			// Validate roles being set or changed to a new desired state.
 			for _, roleEntry := range entry.Roles {
 				if roleAuth, ok := roleAuths[roleEntry.Role]; ok {

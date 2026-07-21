@@ -695,6 +695,41 @@ func (s *KeeperTestSuite) GenesisTest() {
 	s.Require().Equal(genesis1, genesis2)
 }
 
+// TestUnregisterNFT_RequiresControllerSignature verifies that an NFT owner cannot unilaterally
+// unregister an NFT while a CONTROLLER is set, preventing policy bypass via unregister+re-register.
+func (s *KeeperTestSuite) TestUnregisterNFT_RequiresControllerSignature() {
+	key := &types.RegistryKey{
+		AssetClassId: s.validNFTClass.Id,
+		NftId:        s.validNFT.Id,
+	}
+	require := s.Require()
+	msgServer := keeper.NewMsgServer(s.app.RegistryKeeper)
+
+	// Register with user1 as CONTROLLER (user1 also owns the NFT via Mint in SetupTest).
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user1}},
+	}, ""))
+
+	// user1 owns the NFT but is also the CONTROLLER, so unregistration is allowed.
+	_, err := msgServer.UnregisterNFT(s.ctx, &types.MsgUnregisterNFT{Signer: s.user1, Key: key})
+	require.NoError(err, "controller who also owns the NFT must be able to unregister")
+
+	// Re-register with user2 as CONTROLLER. user1 still owns the NFT.
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user2}},
+	}, ""))
+
+	// user1 (NFT owner, but NOT the controller) tries to unregister — must be rejected.
+	_, err = msgServer.UnregisterNFT(s.ctx, &types.MsgUnregisterNFT{Signer: s.user1, Key: key})
+	require.Error(err, "NFT owner should not be able to unregister while a different controller is set")
+	require.Contains(err.Error(), "unauthorized")
+
+	// Entry must still exist.
+	entry, err := s.app.RegistryKeeper.GetRegistry(s.ctx, key)
+	require.NoError(err)
+	require.NotNil(entry, "registry entry must remain after rejected unregistration")
+}
+
 // TestRegistryBulkUpdate_EnforcesRolePolicies verifies that RegistryBulkUpdate validates role
 // changes through the authorization engine when updating existing entries, so it cannot bypass the
 // same multi-party policies enforced by GrantRole / RevokeRole / SetRoles.
@@ -705,11 +740,14 @@ func (s *KeeperTestSuite) TestRegistryBulkUpdate_EnforcesRolePolicies() {
 	}
 	controllerRole := types.RegistryRole_REGISTRY_ROLE_CONTROLLER
 
-	// Seed an existing entry with user1 as CONTROLLER (user1 also owns the NFT).
+	// Install the CONTROLLER policy so the authorization engine can enforce it.
 	require := s.Require()
+	require.NoError(s.app.RegistryKeeper.SetParams(s.ctx, types.Params{
+		RoleAuthorizations: types.ControllerRoleAuthorizations(),
+	}))
 	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
 		{Role: controllerRole, Addresses: []string{s.user1}},
-	}))
+	}, ""))
 
 	// user1 (current controller + NFT owner) tries to transfer CONTROLLER to user2 without user2
 	// co-signing. The CONTROLLER policy requires the incoming controller to sign; this must fail.
@@ -744,10 +782,15 @@ func (s *KeeperTestSuite) TestDeleteRegistry_ClearsPendingRoleChanges() {
 	}
 	require := s.Require()
 
+	// Install the CONTROLLER policy so the authorization engine can enforce it.
+	require.NoError(s.app.RegistryKeeper.SetParams(s.ctx, types.Params{
+		RoleAuthorizations: types.ControllerRoleAuthorizations(),
+	}))
+
 	// Register the NFT with user1 as CONTROLLER.
 	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
 		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user1}},
-	}))
+	}, ""))
 
 	// Propose a controller change to user2. Because user2 (incoming controller) has not yet
 	// co-signed, this creates a pending change record rather than applying immediately.
