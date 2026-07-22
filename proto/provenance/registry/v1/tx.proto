@@ -68,6 +68,11 @@ service Msg {
   // Only the original proposer may cancel.
   rpc CancelRoleChange(MsgCancelRoleChange) returns (MsgCancelRoleChangeResponse);
 
+  // AssociateRegistryClass associates or updates the registry class for an existing registry entry
+  // without modifying any roles. The signer must be the CONTROLLER if one is set, or the scope
+  // data owner if the NFT is a Provenance Metadata Scope, or the NFT owner otherwise.
+  rpc AssociateRegistryClass(MsgAssociateRegistryClass) returns (MsgAssociateRegistryClassResponse);
+
   // UpdateParams is a governance proposal endpoint for updating the registry module's params,
   // including the default role authorization policies. The authority must be the governance module
   // account address.
@@ -273,6 +278,32 @@ message MsgCancelRoleChange {
 
 // MsgCancelRoleChangeResponse defines the response for CancelRoleChange.
 message MsgCancelRoleChangeResponse {}
+
+// MsgAssociateRegistryClass associates or updates the registry class for an existing registry
+// entry without modifying any roles. This is the upgrade path from legacy (no-class) registration
+// to class-governed authorization.
+//
+// Authorization: the signer must satisfy at least one of the following — neither takes precedence:
+//   - CONTROLLER: the signer is one of the entry's CONTROLLER role addresses.
+//   - Scope data owner: if the NFT is a Provenance Metadata Scope, the signer is one of the
+//     scope's data-owner parties.
+//   - NFT owner: for all other NFTs, the signer owns the NFT.
+message MsgAssociateRegistryClass {
+  option (cosmos.msg.v1.signer) = "signer";
+
+  // signer is the address authorizing this association.
+  string signer = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
+
+  // key identifies the existing registry entry to update.
+  RegistryKey key = 2;
+
+  // registry_class_id is the ID of the registry class to associate. Must be non-empty; the
+  // referenced class must exist and its asset_class_id must match the entry's asset_class_id.
+  string registry_class_id = 3 [(gogoproto.jsontag) = "registryClassId,omitempty"];
+}
+
+// MsgAssociateRegistryClassResponse defines the response for AssociateRegistryClass.
+message MsgAssociateRegistryClassResponse {}
 
 // MsgCreateRegistryClass creates a new registry class defining asset class-level authorization
 // rules for role updates within an NFT collection.

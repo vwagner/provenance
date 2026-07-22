@@ -232,6 +232,39 @@ func (k msgServer) CancelRoleChange(ctx context.Context, msg *types.MsgCancelRol
 	return &types.MsgCancelRoleChangeResponse{}, nil
 }
 
+// AssociateRegistryClass associates or updates the registry class on an existing entry.
+// The entry must already exist; use RegisterNFT with a registry_class_id to set it on creation.
+// Auth: CONTROLLER or scope data owner (if NFT is a Metadata Scope) or NFT owner — either is sufficient.
+func (k msgServer) AssociateRegistryClass(ctx context.Context, msg *types.MsgAssociateRegistryClass) (*types.MsgAssociateRegistryClassResponse, error) {
+	entry, err := k.GetRegistry(ctx, msg.Key)
+	if err != nil {
+		return nil, fmt.Errorf("could not get registry entry: %w", err)
+	}
+	if entry == nil {
+		return nil, types.NewErrCodeRegistryNotFound(msg.Key.NftId)
+	}
+
+	// Either a CONTROLLER or the scope data owner / NFT owner may associate a registry class.
+	// Neither takes precedence — the first matching condition is sufficient.
+	isController := slices.Contains(entry.GetRoleAddrs(types.RegistryRole_REGISTRY_ROLE_CONTROLLER), msg.Signer)
+	if !isController {
+		if err := k.validateAssociateRegistryClassSigner(ctx, &msg.Key.AssetClassId, &msg.Key.NftId, msg.Signer); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := k.validateRegistryClassForEntry(ctx, msg.RegistryClassId, entry.Key.AssetClassId); err != nil {
+		return nil, err
+	}
+
+	entry.RegistryClassId = msg.RegistryClassId
+	if err := k.SetRegistry(ctx, *entry); err != nil {
+		return nil, err
+	}
+
+	return &types.MsgAssociateRegistryClassResponse{}, nil
+}
+
 // CreateRegistryClass creates a new registry class defining asset class-level authorization rules.
 func (k msgServer) CreateRegistryClass(ctx context.Context, msg *types.MsgCreateRegistryClass) (*types.MsgCreateRegistryClassResponse, error) {
 	class := types.RegistryClass{

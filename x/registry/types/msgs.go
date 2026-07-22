@@ -191,6 +191,24 @@ func (m MsgCancelRoleChange) ValidateBasic() error {
 	return errors.Join(errs...)
 }
 
+// ValidateBasic validates the MsgAssociateRegistryClass message.
+func (m MsgAssociateRegistryClass) ValidateBasic() error {
+	var errs []error
+	if _, err := sdk.AccAddressFromBech32(m.Signer); err != nil {
+		errs = append(errs, NewErrCodeInvalidField("signer", "%s", err))
+	}
+
+	if m.Key == nil {
+		errs = append(errs, NewErrCodeInvalidField("key", "key is required"))
+	}
+
+	if len(m.RegistryClassId) == 0 {
+		errs = append(errs, NewErrCodeInvalidField("registry_class_id", "registry_class_id is required"))
+	}
+
+	return errors.Join(errs...)
+}
+
 // ValidateBasic validates the MsgCreateRegistryClass message
 func (m MsgCreateRegistryClass) ValidateBasic() error {
 	var errs []error

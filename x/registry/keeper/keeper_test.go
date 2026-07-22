@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
 	"cosmossdk.io/x/nft"
@@ -17,6 +18,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/types/query"
 
 	"github.com/provenance-io/provenance/app"
+	metadatatypes "github.com/provenance-io/provenance/x/metadata/types"
 	"github.com/provenance-io/provenance/testutil/assertions"
 	"github.com/provenance-io/provenance/x/registry/keeper"
 	"github.com/provenance-io/provenance/x/registry/types"
@@ -1120,4 +1122,209 @@ func (s *KeeperTestSuite) TestRegisterNFTMsgServer() {
 			}
 		})
 	}
+}
+
+// TestAssociateRegistryClass_ControllerCanAssociate verifies that a CONTROLLER signer can
+// associate a registry class on an existing entry.
+func (s *KeeperTestSuite) TestAssociateRegistryClass_ControllerCanAssociate() {
+	require := s.Require()
+	key := &types.RegistryKey{AssetClassId: s.validNFTClass.Id, NftId: s.validNFT.Id}
+
+	// Create a class whose asset_class_id matches the entry.
+	class := types.RegistryClass{
+		RegistryClassId:    "test-class",
+		AssetClassId:       s.validNFTClass.Id,
+		Maintainer:         s.user1,
+		RoleAuthorizations: nil,
+	}
+	require.NoError(s.app.RegistryKeeper.CreateRegistryClass(s.ctx, class))
+
+	// Register with a controller but no class yet.
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user1}},
+	}, ""))
+
+	msg := &types.MsgAssociateRegistryClass{
+		Signer:          s.user1,
+		Key:             key,
+		RegistryClassId: "test-class",
+	}
+	_, err := keeper.NewMsgServer(s.app.RegistryKeeper).AssociateRegistryClass(s.ctx, msg)
+	require.NoError(err, "controller must be allowed to associate a registry class")
+
+	entry, err := s.app.RegistryKeeper.GetRegistry(s.ctx, key)
+	require.NoError(err)
+	require.NotNil(entry)
+	require.Equal("test-class", entry.RegistryClassId, "registry_class_id must be updated")
+}
+
+// TestAssociateRegistryClass_NFTOwnerCanAssociateWhenControllerSet verifies that the NFT owner can
+// associate a registry class even when a separate controller is set — neither takes precedence.
+func (s *KeeperTestSuite) TestAssociateRegistryClass_NFTOwnerCanAssociateWhenControllerSet() {
+	require := s.Require()
+	key := &types.RegistryKey{AssetClassId: s.validNFTClass.Id, NftId: s.validNFT.Id}
+
+	class := types.RegistryClass{
+		RegistryClassId: "test-class",
+		AssetClassId:    s.validNFTClass.Id,
+		Maintainer:      s.user1,
+	}
+	require.NoError(s.app.RegistryKeeper.CreateRegistryClass(s.ctx, class))
+
+	// user2 is the controller; user1 owns the NFT.
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user2}},
+	}, ""))
+
+	// user1 (NFT owner, not controller) must still be able to associate.
+	msg := &types.MsgAssociateRegistryClass{
+		Signer:          s.user1,
+		Key:             key,
+		RegistryClassId: "test-class",
+	}
+	_, err := keeper.NewMsgServer(s.app.RegistryKeeper).AssociateRegistryClass(s.ctx, msg)
+	require.NoError(err, "NFT owner must be able to associate even when a controller is set")
+
+	entry, err := s.app.RegistryKeeper.GetRegistry(s.ctx, key)
+	require.NoError(err)
+	require.Equal("test-class", entry.RegistryClassId)
+}
+
+
+// controller nor the NFT owner is rejected even when a controller is set on the entry.
+func (s *KeeperTestSuite) TestAssociateRegistryClass_UnauthorizedSignerRejected() {
+	require := s.Require()
+	key := &types.RegistryKey{AssetClassId: s.validNFTClass.Id, NftId: s.validNFT.Id}
+
+	class := types.RegistryClass{
+		RegistryClassId: "test-class",
+		AssetClassId:    s.validNFTClass.Id,
+		Maintainer:      s.user1,
+	}
+	require.NoError(s.app.RegistryKeeper.CreateRegistryClass(s.ctx, class))
+
+	// user1 is the controller AND NFT owner; user2 is neither.
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{
+		{Role: types.RegistryRole_REGISTRY_ROLE_CONTROLLER, Addresses: []string{s.user1}},
+	}, ""))
+
+	msg := &types.MsgAssociateRegistryClass{
+		Signer:          s.user2,
+		Key:             key,
+		RegistryClassId: "test-class",
+	}
+	_, err := keeper.NewMsgServer(s.app.RegistryKeeper).AssociateRegistryClass(s.ctx, msg)
+	require.Error(err, "signer who is neither controller nor NFT owner must be rejected")
+}
+
+// TestAssociateRegistryClass_NFTOwnerCanAssociateWithoutController verifies that the NFT owner can
+// associate a class when no controller is set on the entry.
+func (s *KeeperTestSuite) TestAssociateRegistryClass_NFTOwnerCanAssociateWithoutController() {
+	require := s.Require()
+	key := &types.RegistryKey{AssetClassId: s.validNFTClass.Id, NftId: s.validNFT.Id}
+
+	class := types.RegistryClass{
+		RegistryClassId: "test-class",
+		AssetClassId:    s.validNFTClass.Id,
+		Maintainer:      s.user1,
+	}
+	require.NoError(s.app.RegistryKeeper.CreateRegistryClass(s.ctx, class))
+
+	// No controller set — entry created by user1 who also owns the NFT.
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{}, ""))
+
+	msg := &types.MsgAssociateRegistryClass{
+		Signer:          s.user1,
+		Key:             key,
+		RegistryClassId: "test-class",
+	}
+	_, err := keeper.NewMsgServer(s.app.RegistryKeeper).AssociateRegistryClass(s.ctx, msg)
+	require.NoError(err, "NFT owner must be allowed when no controller is set")
+
+	entry, err := s.app.RegistryKeeper.GetRegistry(s.ctx, key)
+	require.NoError(err)
+	require.Equal("test-class", entry.RegistryClassId)
+}
+
+// TestAssociateRegistryClass_ScopeDataOwnerCanAssociate verifies that a scope data-owner party can
+// associate a registry class when the NFT is a Provenance Metadata Scope.
+func (s *KeeperTestSuite) TestAssociateRegistryClass_ScopeDataOwnerCanAssociate() {
+	require := s.Require()
+
+	// Create a real Provenance Metadata Scope.
+	scopeID := metadatatypes.ScopeMetadataAddress(uuid.New())
+	scope := metadatatypes.NewScope(
+		scopeID,
+		metadatatypes.MetadataAddress{}, // no spec required for this test
+		[]metadatatypes.Party{
+			{Address: s.user1, Role: metadatatypes.PartyType_PARTY_TYPE_OWNER},
+		},
+		nil,   // no data access
+		"",    // no value owner
+		false, // no party rollup
+	)
+	require.NoError(s.app.MetadataKeeper.SetScope(s.ctx, *scope))
+
+	// The "asset class" for a Scope is a scope-spec address; for this test we reuse the existing
+	// nft class and rely on the fact that the registry module validates the NFT exists via scope
+	// lookup, not class lookup for scope-type NFTs.  Use the scope bech32 as the nftID.
+	scopeBech32 := scopeID.String()
+
+	// We need an asset_class_id for the RegistryKey — use the NFT class id as a stand-in.
+	assetClassID := s.validNFTClass.Id
+	key := &types.RegistryKey{AssetClassId: assetClassID, NftId: scopeBech32}
+
+	class := types.RegistryClass{
+		RegistryClassId: "scope-class",
+		AssetClassId:    assetClassID,
+		Maintainer:      s.user1,
+	}
+	require.NoError(s.app.RegistryKeeper.CreateRegistryClass(s.ctx, class))
+
+	// Register without controller — no scope spec check needed for this path.
+	require.NoError(s.app.RegistryKeeper.SetRegistry(s.ctx, types.RegistryEntry{
+		Key:             key,
+		Roles:           []types.RolesEntry{},
+		RegistryClassId: "",
+	}))
+
+	msg := &types.MsgAssociateRegistryClass{
+		Signer:          s.user1, // user1 is a scope Owner party (data owner)
+		Key:             key,
+		RegistryClassId: "scope-class",
+	}
+	_, err := keeper.NewMsgServer(s.app.RegistryKeeper).AssociateRegistryClass(s.ctx, msg)
+	require.NoError(err, "scope data owner must be allowed to associate a registry class")
+}
+
+// TestAssociateRegistryClass_EmptyClassIdRejected verifies that an empty registry_class_id is
+// rejected at ValidateBasic.
+func (s *KeeperTestSuite) TestAssociateRegistryClass_EmptyClassIdRejected() {
+	require := s.Require()
+	key := &types.RegistryKey{AssetClassId: s.validNFTClass.Id, NftId: s.validNFT.Id}
+	require.NoError(s.app.RegistryKeeper.CreateRegistry(s.ctx, key, []types.RolesEntry{}, ""))
+
+	msg := types.MsgAssociateRegistryClass{
+		Signer:          s.user1,
+		Key:             key,
+		RegistryClassId: "",
+	}
+	err := msg.ValidateBasic()
+	require.Error(err, "empty registry_class_id must be rejected by ValidateBasic")
+	require.Contains(err.Error(), "registry_class_id")
+}
+
+// TestAssociateRegistryClass_EntryNotFound verifies that the handler returns an error when there
+// is no existing registry entry for the given key.
+func (s *KeeperTestSuite) TestAssociateRegistryClass_EntryNotFound() {
+	require := s.Require()
+	key := &types.RegistryKey{AssetClassId: s.validNFTClass.Id, NftId: "non-existent-nft"}
+
+	msg := &types.MsgAssociateRegistryClass{
+		Signer:          s.user1,
+		Key:             key,
+		RegistryClassId: "some-class",
+	}
+	_, err := keeper.NewMsgServer(s.app.RegistryKeeper).AssociateRegistryClass(s.ctx, msg)
+	require.Error(err, "must return an error when the registry entry does not exist")
 }
