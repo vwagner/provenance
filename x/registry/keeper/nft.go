@@ -5,6 +5,7 @@ import (
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
+	metadatatypes "github.com/provenance-io/provenance/x/metadata/types"
 	"github.com/provenance-io/provenance/x/registry/types"
 )
 
@@ -71,11 +72,11 @@ func (k Keeper) validateAssociateRegistryClassSigner(ctx context.Context, assetC
 			return types.NewErrCodeNFTNotFound(*nftID)
 		}
 		for _, party := range scope.Owners {
-			if party.Address == signer {
+			if party.Address == signer && party.Role == metadatatypes.PartyType_PARTY_TYPE_OWNER {
 				return nil
 			}
 		}
-		return types.NewErrCodeUnauthorized("signer is not a data owner of the scope")
+		return types.NewErrCodeUnauthorized("signer is not a data owner (PARTY_TYPE_OWNER) of the scope")
 	}
 	return k.ValidateNFTOwner(ctx, assetClassID, nftID, signer)
 }

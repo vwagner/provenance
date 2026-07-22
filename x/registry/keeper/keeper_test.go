@@ -1297,7 +1297,46 @@ func (s *KeeperTestSuite) TestAssociateRegistryClass_ScopeDataOwnerCanAssociate(
 	require.NoError(err, "scope data owner must be allowed to associate a registry class")
 }
 
-// TestAssociateRegistryClass_EmptyClassIdRejected verifies that an empty registry_class_id is
+// TestAssociateRegistryClass_NonOwnerScopePartyRejected verifies that a scope party whose role is
+// not PARTY_TYPE_OWNER is rejected, even though they appear in scope.Owners.
+func (s *KeeperTestSuite) TestAssociateRegistryClass_NonOwnerScopePartyRejected() {
+	require := s.Require()
+
+	scopeID := metadatatypes.ScopeMetadataAddress(uuid.New())
+	scope := metadatatypes.NewScope(
+		scopeID,
+		metadatatypes.MetadataAddress{},
+		[]metadatatypes.Party{
+			// user1 is an originator — not a data owner.
+			{Address: s.user1, Role: metadatatypes.PartyType_PARTY_TYPE_ORIGINATOR},
+		},
+		nil, "", false,
+	)
+	require.NoError(s.app.MetadataKeeper.SetScope(s.ctx, *scope))
+
+	assetClassID := s.validNFTClass.Id
+	key := &types.RegistryKey{AssetClassId: assetClassID, NftId: scopeID.String()}
+
+	class := types.RegistryClass{
+		RegistryClassId: "scope-class",
+		AssetClassId:    assetClassID,
+		Maintainer:      s.user1,
+	}
+	require.NoError(s.app.RegistryKeeper.CreateRegistryClass(s.ctx, class))
+	require.NoError(s.app.RegistryKeeper.SetRegistry(s.ctx, types.RegistryEntry{
+		Key: key, Roles: []types.RolesEntry{},
+	}))
+
+	msg := &types.MsgAssociateRegistryClass{
+		Signer:          s.user1,
+		Key:             key,
+		RegistryClassId: "scope-class",
+	}
+	_, err := keeper.NewMsgServer(s.app.RegistryKeeper).AssociateRegistryClass(s.ctx, msg)
+	require.Error(err, "scope party with non-OWNER role must be rejected")
+}
+
+
 // rejected at ValidateBasic.
 func (s *KeeperTestSuite) TestAssociateRegistryClass_EmptyClassIdRejected() {
 	require := s.Require()
